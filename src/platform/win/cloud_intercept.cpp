@@ -106,11 +106,17 @@ static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 // Hooks this to inject game_extra_info into CMsgClientGamesPlayed before serialization.
 static constexpr uintptr_t SC_RVA_BASYNC_SEND = 0xCF9590;
 static constexpr size_t SC_BAS_STOLEN_BYTES = 15;   // 5+5+1+4 bytes of prologue
-// CProtoBufMsg layout offsets
+// CProtoBufMsg layout offsets (steamclient build 11.12.30.07).
+// An 8-byte field was inserted after the descriptor, shifting CONN/EMSG/HDR/BODY
+// by +0x08 vs the previous layout; DESC stayed at 0x08.
+// Verified: base ctor (0xD1C350) stores emsg|PROTO_FLAG at +0x28, connection
+// handle sentinel at +0x24; typed ctor (0xA6CCxx) writes the descriptor at +0x08
+// and the protobuf body at +0x38; finalize (0xD21D50) guards `cmp [rcx+0x38],0`.
 static constexpr uint32_t CPROTOBUFMSG_OFF_DESC   = 0x08;  // typed-body descriptor vtable*
-static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x1C;  // uint32_t connection handle
-static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x20;  // uint32_t EMsg | PROTO_FLAG
-static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body object*
+static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x24;  // uint32_t connection handle
+static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x28;  // uint32_t EMsg | PROTO_FLAG
+static constexpr uint32_t CPROTOBUFMSG_OFF_HDR    = 0x30;  // message header object*
+static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x38;  // protobuf body object*
 
 // g_pJobCur (qword_1397E02C0): current CJob coroutine. CJobID at CJob+32.
 // Only valid on BMainLoop/job thread (yield primitives assert g_pJobCur != NULL).
@@ -229,7 +235,7 @@ using NotificationSlot7Fn = bool(__fastcall*)(void* thisptr, const char* methodN
 using NotificationSlot8Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                void* request);
 // sub_138BD0210: ParseFromArray - fills a protobuf message object from raw bytes
-//   rcx = protobuf message object (body at CProtoBufMsg+48)
+//   rcx = protobuf message object (body at CProtoBufMsg+0x38)
 //   rdx = raw data pointer
 //   r8  = raw data size (as int)
 using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int size);
@@ -1969,7 +1975,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         strcmp(methodName, "Parental.GetSignedParentalSettings#1") == 0) {
         bool result = g_originalSlot5(thisptr, methodName, request, response, flags);
         if (result && response) {
-            void* respBody = *(void**)((uintptr_t)response + 48);
+            void* respBody = *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY);
             if (respBody) {
                 auto respBytes = SerializeBodyToBytes(respBody);
                 auto respFields = PB::Parse(respBytes.data(), respBytes.size());
@@ -1999,7 +2005,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             ? MetadataSync::schemaFetch.load(std::memory_order_relaxed)
             : MetadataSync::SchemaFetchEnabled())) {
         if (request && response) {
-            void* reqBody = *(void**)((uintptr_t)request + 48);
+            void* reqBody = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_BODY);
             if (reqBody) {
                 auto reqBytes = SerializeBodyToBytes(reqBody);
                 auto reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
@@ -2009,7 +2015,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                 LOG("[Stats] slot5 GetUserStats seen: app=%u namespace=%d", appId, IsNamespaceApp(appId) ? 1 : 0);
                 if (appId != 0 && IsNamespaceApp(appId)) {
                     auto res = StatsHandlers::HandleGetUserStats(appId, reqFields);
-                    void* respBody = *(void**)((uintptr_t)response + 48);
+                    void* respBody = *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY);
                     if (respBody && res.body.Size() > 0 &&
                         ParseBytesToBody(respBody, res.body.Data().data(), res.body.Size())) {
                         if (flags) *flags = 0;
@@ -2018,7 +2024,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                         return true;
                     }
                     LOG("[Stats] GetUserStats app=%u NOT handled (respBody=%p bodySize=%zu) -> passthrough",
-                        appId, *(void**)((uintptr_t)response + 48), res.body.Size());
+                        appId, *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY), res.body.Size());
                 }
             } else {
                 LOG("[Stats] slot5 GetUserStats: null reqBody -> passthrough");
@@ -2035,12 +2041,12 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         bool result = g_originalSlot5(thisptr, methodName, request, response, flags);
         LOG("[Stats] slot5 GetLastPlayedTimes seen: serverResult=%d", result ? 1 : 0);
         if (result && response) {
-            void* respBody = *(void**)((uintptr_t)response + 48);
+            void* respBody = *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY);
             if (respBody) {
                 // Parse the request to honor min_last_played.
                 std::vector<PB::Field> reqFields;
                 if (request) {
-                    void* reqBody = *(void**)((uintptr_t)request + 48);
+                    void* reqBody = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_BODY);
                     if (reqBody) {
                         auto reqBytes = SerializeBodyToBytes(reqBody);
                         reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
@@ -2107,8 +2113,8 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
-    // Extract the request body from CProtoBufMsg+48
-    void* reqBody = *(void**)((uintptr_t)request + 48);
+    // Extract the request body from CProtoBufMsg+0x38
+    void* reqBody = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_BODY);
     if (!reqBody) {
         LOG("[VtHook] %s: request body is NULL, passing through", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
@@ -2151,7 +2157,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             bool spyResult = g_originalSlot5(thisptr, methodName, request, response, flags);
             // Inspect the response body only on success: a failed call may leave the
             // body slot without a constructed message.
-            void* spyRespBody = spyResult ? *(void**)((uintptr_t)response + 48) : nullptr;
+            void* spyRespBody = spyResult ? *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY) : nullptr;
             if (spyRespBody) {
                 auto respBytes = SerializeBodyToBytes(spyRespBody);
                 LOG("[SPY] %s app=%u native response (%zu bytes, result=%d):",
@@ -2178,7 +2184,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
 
     // Capture SteamID from the request header. Detects account switches.
     if (!g_steamIdFromHeader.load()) {
-        void* reqHeader = *(void**)((uintptr_t)request + 40);
+        void* reqHeader = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_HDR);
         if (reqHeader) {
             auto hdrBytes = SerializeBodyToBytes(reqHeader);
             if (!hdrBytes.empty()) {
@@ -2244,14 +2250,14 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
 
     // Validate response header BEFORE writing body to avoid corrupting the
     // response protobuf object on a failure path.
-    void* respHeader = *(void**)((uintptr_t)response + 40);
+    void* respHeader = *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_HDR);
     if (!respHeader) {
         LOG("[VtHook] %s: respHeader is NULL, cannot deliver response", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
     // Write the response body into the response CProtoBufMsg
-    void* respBody = *(void**)((uintptr_t)response + 48);
+    void* respBody = *(void**)((uintptr_t)response + CPROTOBUFMSG_OFF_BODY);
     if (!respBody) {
         LOG("[VtHook] %s: response body object is NULL, cannot write response!", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
@@ -2264,7 +2270,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         }
     }
 
-    // Write eresult into response header (CProtoBufMsg+40):
+    // Write eresult into response header (CProtoBufMsg+0x30):
     //   has_bits |= 0x20000000 (eresult), |= 0x40000000 (error_message)
     //   header+216 = eresult, header+220 = error_code
     if (!SEH_WriteResponseHeader(respHeader, result.eresult)) {
@@ -2336,7 +2342,7 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
 
     if (ParentalBypass::IsParentalNotification(methodName) && g_parentalBypassPlaytime.load()) {
         if (request) {
-            void* bodyObj = *(void**)((uintptr_t)request + 48);
+            void* bodyObj = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_BODY);
             if (bodyObj && strcmp(methodName, ParentalBypass::NOTIFY_SETTINGS_CHANGE) == 0) {
                 auto bodyBytes = SerializeBodyToBytes(bodyObj);
                 auto notifFields = PB::Parse(bodyBytes.data(), bodyBytes.size());
@@ -2374,8 +2380,8 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         return g_originalSlot8(thisptr, methodName, request);
     }
 
-    // Extract body from CProtoBufMsg+48
-    void* bodyObj = *(void**)((uintptr_t)request + 48);
+    // Extract body from CProtoBufMsg+0x38
+    void* bodyObj = *(void**)((uintptr_t)request + CPROTOBUFMSG_OFF_BODY);
     uint32_t realAppId = CheckNotificationNamespaceApp(methodName, bodyObj);
 
     if (realAppId == 0) {
@@ -5508,7 +5514,7 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
         }
         // Capture session fields from any outgoing message for injected 818s.
         if (!g_hdrCaptured.load(std::memory_order_relaxed)) {
-            void* ownHdr = *(void**)((uintptr_t)pMsg + 0x28);
+            void* ownHdr = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_HDR);
             if (ownHdr) {
                 uint8_t* hb = (uint8_t*)ownHdr;
                 uint64_t sid = *(uint64_t*)(hb + 104);
@@ -5927,7 +5933,7 @@ static bool SendSchemaRequest(uint32_t appId, uint64_t ownerId, uint32_t connHan
     g_pbMsgCtor(msg, (int)EMSG_CLIENT_GET_USER_STATS, 0);     // base ctor: emsg=818
     *(void**)(msg + 0) = g_getUserStatsVtbl;                  // install typed vftable
     *(void**)(msg + CPROTOBUFMSG_OFF_DESC) = g_getUserStatsDesc; // typed-body descriptor
-    g_pbMsgFinalize(msg);                                      // allocate body at +0x30
+    g_pbMsgFinalize(msg);                                      // allocate body at +0x38
 
     void* body = *(void**)(msg + CPROTOBUFMSG_OFF_BODY);
     if (!body) { g_pbMsgCleanup(msg); return false; }
@@ -5937,7 +5943,7 @@ static bool SendSchemaRequest(uint32_t appId, uint64_t ownerId, uint32_t connHan
     //  2. Session fields (steamid, sessionid, realm, jobid_source): CM drops without.
     // Offsets: +104 steamid, +112 sessionid, +156 realm, +208 jobid_source
     static std::atomic<uint64_t> s_jobIdCounter{0x5C00000000000001ull};
-    if (void* hdr = *(void**)(msg + 0x28)) {
+    if (void* hdr = *(void**)(msg + CPROTOBUFMSG_OFF_HDR)) {
         uint8_t* h = (uint8_t*)hdr;
         *(int32_t*)(h + 192) = -1;                         // expiry = -1 (no deadline)
         *(uint32_t*)(h + 16) &= ~0x4000000u;               // clear "no reply expected"
