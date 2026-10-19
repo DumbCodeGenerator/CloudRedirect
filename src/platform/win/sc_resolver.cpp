@@ -93,33 +93,112 @@ static uintptr_t ResolveServiceTransportVtable() {
     return SigScanner::ResolveVtableByRtti(".?AVCClientUnifiedServiceTransport@@");
 }
 
-// ── Global engine pointer ─────────────────────────────────────────────
-// Approach: FlushAppMinutesPlayed at +0x09 loads g_pCSteamEngine via
-// `mov rax, cs:[rip+disp]`. We can also scan for `lea rcx/rbx, [reg+0xE68]`
-// (CAppInfoCache offset) and backwalk to the preceding mov from global.
-// The CAppInfoCache approach is more generic and doesn't depend on any
-// single function existing.
+// ── AppInfoCache offset (dynamic) ─────────────────────────────────────
+// The CSteamEngine -> CAppInfoCache offset drifts between Steam builds, so
+// derive it at runtime rather than hardcoding it: every GetAppInfo call site
+// loads the cache pointer with `lea reg,[engine+disp32]` just before the call.
+// Collect those disp32 values into a histogram; the overwhelming majority is
+// the actual offset for the running build.
+static uint32_t DetectAppInfoCacheOffset(uintptr_t getAppInfoAddr) {
+    if (!getAppInfoAddr) {
+        LOG("[Resolver] AppInfoCache offset: GetAppInfo unresolved, cannot derive");
+        return 0;
+    }
 
-static uintptr_t ResolveGlobalEngine(uintptr_t scBase) {
-    // Scan for `lea reg, [reg + CAppInfoCache offset]` and backwalk to the
-    // preceding `mov reg, [rip+disp]` that loads the engine global.
-    //
-    // Offset history:
-    //   <= build 1782344391: CAppInfoCache at CSteamEngine+0x0E68
-    //   build 11.12.30.07   : CAppInfoCache at CSteamEngine+0x1208
-    //     (verified: 131 GetAppInfo callers do
-    //        mov rbx,[rip->0x181D008]; lea rcx,[rbx+0x1208]; call GetAppInfo)
-    // The offset is tried newest-first so a single Steam update only needs
-    // the constant list extended.
-    static constexpr int32_t kAppInfoCacheOffsets[] = {0x1208, 0x0E68};
+    const auto* text = reinterpret_cast<const uint8_t*>(SigScanner::GetTextBase());
+    size_t textSize = SigScanner::GetTextSize();
+    uintptr_t textBase = SigScanner::GetTextBase();
+
+    struct Entry { int32_t disp; int votes; };
+    Entry hist[32];
+    int histCount = 0;
+    int totalVotes = 0;
+    int callSites = 0;
+
+    __try {
+        for (size_t i = 0; i + 5 <= textSize; ++i) {
+            if (text[i] != 0xE8) continue;
+            int32_t rel = *reinterpret_cast<const int32_t*>(text + i + 1);
+            uintptr_t target = textBase + i + 5 + rel;
+            if (target != getAppInfoAddr) continue;
+            ++callSites;
+
+            // Look back over the argument setup: only count `lea reg,[reg+disp32]`
+            // (mod=10) with a plain register base -- stack-frame and RIP-relative
+            // encodings use different ModRM forms and are excluded naturally.
+            int64_t lo = static_cast<int64_t>(i) - 96;
+            if (lo < 0) lo = 0;
+            for (int64_t j = static_cast<int64_t>(i) - 7; j >= lo; --j) {
+                if (text[j] < 0x48 || text[j] > 0x4F) continue;
+                if (text[j + 1] != 0x8D) continue;
+                uint8_t modrm = text[j + 2];
+                if ((modrm & 0xC0) != 0x80) continue;  // mod=10 -> disp32
+                uint8_t rm = modrm & 0x07;
+                if (rm == 4 || rm == 5) continue;      // SIB / RIP-relative
+                int32_t disp = *reinterpret_cast<const int32_t*>(text + j + 3);
+                // Only accept struct-offset magnitudes, filtering out stack slots.
+                if (disp < 0x100 || disp > 0x100000) continue;
+                ++totalVotes;
+                int k = 0;
+                for (; k < histCount; ++k) {
+                    if (hist[k].disp == disp) { hist[k].votes++; break; }
+                }
+                if (k == histCount && histCount < 32) {
+                    hist[histCount].disp = disp;
+                    hist[histCount].votes = 1;
+                    ++histCount;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (histCount == 0 || callSites < 5) {
+        LOG("[Resolver] AppInfoCache offset: insufficient evidence (%d call site(s))", callSites);
+        return 0;
+    }
+
+    int best = 0;
+    for (int k = 1; k < histCount; ++k)
+        if (hist[k].votes > hist[best].votes) best = k;
+
+    // Require a minimum vote count and an overwhelming majority so a few
+    // unrelated lea instructions can't skew the result.
+    if (hist[best].votes < 10 || hist[best].votes * 10 < totalVotes * 7) {
+        LOG("[Resolver] AppInfoCache offset: ambiguous (best 0x%X with %d/%d votes over %d call site(s))",
+            hist[best].disp, hist[best].votes, totalVotes, callSites);
+        return 0;
+    }
+
+    LOG("[Resolver] AppInfoCache offset detected: 0x%X (%d call site(s))",
+        hist[best].disp, callSites);
+    return static_cast<uint32_t>(hist[best].disp);
+}
+
+// ── Global engine pointer ─────────────────────────────────────────────
+// Scan for `lea reg,[reg+<AppInfoCache offset>]` (offset derived dynamically,
+// with known values as fallback) and backwalk to the preceding
+// `mov reg,[rip+disp]` that loads the engine global from .data.
+static uintptr_t ResolveGlobalEngine(uintptr_t scBase, uint32_t detectedOff) {
+    int32_t candidates[4];
+    int candidateCount = 0;
+    auto addCandidate = [&](int32_t off) {
+        if (off == 0) return;
+        for (int k = 0; k < candidateCount; ++k)
+            if (candidates[k] == off) return;
+        if (candidateCount < 4) candidates[candidateCount++] = off;
+    };
+    addCandidate(static_cast<int32_t>(detectedOff));
+    // Legacy fallbacks (newest-first) if detection was inconclusive.
+    addCandidate(0x1208);   // build 11.12.30.07
+    addCandidate(0x0E68);   // <= build 1782344391
 
     const auto* text = reinterpret_cast<const uint8_t*>(SigScanner::GetTextBase());
     size_t textSize = SigScanner::GetTextSize();
     const uintptr_t dataBase = SigScanner::GetDataBase();
     const uintptr_t dataEnd  = dataBase + SigScanner::GetDataSize();
 
-    for (int32_t want : kAppInfoCacheOffsets) {
-        if (!want) continue;
+    for (int c = 0; c < candidateCount; ++c) {
+        int32_t want = candidates[c];
         __try {
             for (size_t i = 0; i + 7 <= textSize; ++i) {
                 if ((text[i] == 0x48 || text[i] == 0x4C) && text[i+1] == 0x8D &&
@@ -607,8 +686,18 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
     r.ccmInterfaceVtable = ResolveCCMInterfaceVtable();
     r.serviceTransportVtable = ResolveServiceTransportVtable();
 
-    // Phase 2: Global engine pointer
-    r.globalEngine = ResolveGlobalEngine(steamClientBase);
+    // Phase 2: AppInfo functions + engine global pointer.
+    // Order matters: the CAppInfoCache offset is derived from the GetAppInfo
+    // call sites, and the engine global is found via the
+    // `lea reg,[reg+offset]` -> `mov reg,[rip+disp]` backwalk.
+    r.getAppInfo = ResolveGetAppInfo();
+    uint32_t appInfoCacheOff = DetectAppInfoCacheOffset(r.getAppInfo);
+    if (!appInfoCacheOff) {
+        appInfoCacheOff = 0x1208;
+        LOG("[Resolver] AppInfoCache offset: falling back to 0x1208");
+    }
+    r.engineOffAppInfoCache = appInfoCacheOff;
+    r.globalEngine = ResolveGlobalEngine(steamClientBase, appInfoCacheOff);
 
     // Phase 3: Protobuf helpers (signature-based)
     r.serializeToArray = ResolveSerializeToArray();
@@ -685,8 +774,8 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
     r.kvSetInt     = ResolveKvSetInt();
     r.kvSetString  = ResolveKvSetString();
 
-    // Phase 9: AppInfo functions (signature-based, ReadConfigU64 anchored to GetAppInfo)
-    r.getAppInfo     = ResolveGetAppInfo();
+    // Phase 9: AppInfo functions (getAppInfo resolved in Phase 2;
+    // ReadConfigU64 anchored to it)
     r.getSection     = ResolveGetSection();
     r.readConfigU64  = ResolveReadConfigU64(r.getAppInfo);
 
@@ -1023,7 +1112,7 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
     r.engineOffUserMap      = 0;
     r.ccmOffConnContext     = 0;
     r.userOffCcmInterface   = 0;
-    r.engineOffAppInfoCache = 0x1208;
+    // engineOffAppInfoCache is derived dynamically in Phase 2.
 
     LOG("[Resolver] === Auto-resolution complete ===");
     return r;
