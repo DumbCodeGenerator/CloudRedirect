@@ -228,6 +228,70 @@ static uintptr_t ResolveGlobalEngine(uintptr_t scBase, uint32_t detectedOff) {
     return 0;
 }
 
+// ── CProtoBufMsg layout (dynamic) ─────────────────────────────────────
+// The CProtoBufMsgBase member offsets (connection handle / EMsg / header /
+// body object) drift between Steam builds, so derive them at runtime instead
+// of hardcoding. The base constructor initialises the connection handle to
+// 0xFFFFFFFF -- a unique anchor that pins the whole block:
+//   mov dword ptr [this+CONN], 0FFFFFFFFh
+// The remaining members follow at fixed deltas: EMSG=CONN+4, HDR=CONN+0xC,
+// BODY=CONN+0x14 (holds for both known layouts: 0x1C/0x20/0x28/0x30 and
+// 0x24/0x28/0x30/0x38). Cross-checked against the `cmp qword [this+BODY], 0`
+// guard at the top of the finalize routine.
+struct CpbLayout { uint32_t conn, emsg, hdr, body; };
+
+static bool DetectCProtoBufMsgLayout(uintptr_t ctorAddr, uintptr_t finalizeAddr,
+                                     CpbLayout& out) {
+    uint32_t conn = 0;
+    if (ctorAddr) {
+        const auto* p = reinterpret_cast<const uint8_t*>(ctorAddr);
+        __try {
+            for (int i = 0; i < 0x80; ++i) {
+                if (p[i] != 0xC7) continue;              // mov r/m32, imm32
+                uint8_t modrm = p[i + 1];
+                uint8_t mod = modrm >> 6, rm = modrm & 7;
+                if (rm == 4 || rm == 5) continue;        // SIB / RIP-relative
+                int32_t disp; int immOff;
+                if (mod == 1)      { disp = (int8_t)p[i + 2];            immOff = i + 3; }
+                else if (mod == 2) { disp = *reinterpret_cast<const int32_t*>(p + i + 2); immOff = i + 6; }
+                else continue;                           // no displacement / register form
+                uint32_t imm = *reinterpret_cast<const uint32_t*>(p + immOff);
+                if (imm != 0xFFFFFFFFu) continue;
+                if (disp >= 0x10 && disp <= 0x60) { conn = (uint32_t)disp; break; }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (!conn) return false;
+
+    uint32_t emsg = conn + 0x04;
+    uint32_t hdr  = conn + 0x0C;
+    uint32_t body = conn + 0x14;
+
+    // Cross-check the finalize guard `48 83 79 <disp8> 00` (cmp qword [rcx+disp],0).
+    if (finalizeAddr) {
+        const auto* p = reinterpret_cast<const uint8_t*>(finalizeAddr);
+        __try {
+            for (int i = 0; i < 0x20; ++i) {
+                if (p[i] == 0x48 && p[i + 1] == 0x83 && p[i + 2] == 0x79 &&
+                    p[i + 4] == 0x00 && p[i + 3] >= 0x10 && p[i + 3] <= 0x60) {
+                    if ((uint32_t)p[i + 3] != body)
+                        LOG("[Resolver] CProtoBufMsg: ctor/finalize disagree (body 0x%X vs guard 0x%X), using ctor",
+                            body, (uint32_t)p[i + 3]);
+                    break;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    out.conn = conn;
+    out.emsg = emsg;
+    out.hdr  = hdr;
+    out.body = body;
+    LOG("[Resolver] CProtoBufMsg layout detected: conn=0x%X emsg=0x%X hdr=0x%X body=0x%X",
+        conn, emsg, hdr, body);
+    return true;
+}
+
 // ── Protobuf helpers ──────────────────────────────────────────────────
 // From IDA (build 1782344391):
 //
@@ -949,6 +1013,21 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
                 (void*)r.pbMsgFinalize, (uint64_t)(r.pbMsgFinalize - steamClientBase));
         else
             LOG("[Resolver] PbMsgFinalize: not resolved");
+    }
+
+    // Phase 14b: CProtoBufMsg layout offsets (dynamic) -- derived from the
+    // base ctor's 0xFFFFFFFF connection-handle init, cross-checked with the
+    // finalize guard. Falls back to defaults in the consumer if undetected.
+    {
+        CpbLayout lay;
+        if (DetectCProtoBufMsgLayout(r.pbMsgCtor, r.pbMsgFinalize, lay)) {
+            r.cpbConnOff = lay.conn;
+            r.cpbEmsgOff = lay.emsg;
+            r.cpbHdrOff  = lay.hdr;
+            r.cpbBodyOff = lay.body;
+        } else {
+            LOG("[Resolver] CProtoBufMsg layout: detection failed, consumer will use defaults");
+        }
     }
 
     // Phase 15: YieldIfTimeSlice — prologue + cmp rcx, [rip+g_pJobCur]

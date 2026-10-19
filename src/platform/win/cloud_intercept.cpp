@@ -112,11 +112,15 @@ static constexpr size_t SC_BAS_STOLEN_BYTES = 15;   // 5+5+1+4 bytes of prologue
 // Verified: base ctor (0xD1C350) stores emsg|PROTO_FLAG at +0x28, connection
 // handle sentinel at +0x24; typed ctor (0xA6CCxx) writes the descriptor at +0x08
 // and the protobuf body at +0x38; finalize (0xD21D50) guards `cmp [rcx+0x38],0`.
+// CProtoBufMsg layout offsets.
+// DESC is stable across builds. CONN/EMSG/HDR/BODY drift, so they are set at
+// runtime from the resolver (RunAutoResolver); the values here are the
+// current-build defaults used if detection fails.
 static constexpr uint32_t CPROTOBUFMSG_OFF_DESC   = 0x08;  // typed-body descriptor vtable*
-static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x24;  // uint32_t connection handle
-static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x28;  // uint32_t EMsg | PROTO_FLAG
-static constexpr uint32_t CPROTOBUFMSG_OFF_HDR    = 0x30;  // message header object*
-static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x38;  // protobuf body object*
+static uint32_t CPROTOBUFMSG_OFF_CONN   = 0x24;  // uint32_t connection handle
+static uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x28;  // uint32_t EMsg | PROTO_FLAG
+static uint32_t CPROTOBUFMSG_OFF_HDR    = 0x30;  // message header object*
+static uint32_t CPROTOBUFMSG_OFF_BODY   = 0x38;  // protobuf body object*
 
 // g_pJobCur (qword_1397E02C0): current CJob coroutine. CJobID at CJob+32.
 // Only valid on BMainLoop/job thread (yield primitives assert g_pJobCur != NULL).
@@ -346,6 +350,13 @@ static void RunAutoResolver() {
     }
     g_resolved = ScResolver::Resolve(g_steamClientBase);
     ScResolver::LogComparison(g_resolved, g_steamClientBase);
+
+    // Apply the dynamically detected CProtoBufMsg layout (falls back to the
+    // built-in defaults when detection was inconclusive).
+    if (g_resolved.cpbConnOff) CPROTOBUFMSG_OFF_CONN = g_resolved.cpbConnOff;
+    if (g_resolved.cpbEmsgOff) CPROTOBUFMSG_OFF_EMSG = g_resolved.cpbEmsgOff;
+    if (g_resolved.cpbHdrOff)  CPROTOBUFMSG_OFF_HDR  = g_resolved.cpbHdrOff;
+    if (g_resolved.cpbBodyOff) CPROTOBUFMSG_OFF_BODY = g_resolved.cpbBodyOff;
 
     SteamKvInjector::ResolvedKvAddrs kv;
     kv.globalEnginePtrPtr  = reinterpret_cast<void**>(g_resolved.globalEngine);
