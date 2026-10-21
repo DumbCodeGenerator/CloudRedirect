@@ -1339,6 +1339,15 @@ Esto puede causar pérdida de datos en algunos casos.
   <data name="CloudProvider_UploadInFlightAggressive" xml:space="preserve">
     <value>Agresivo (64)</value>
   </data>
+  <data name="CloudProvider_UploadWorkers" xml:space="preserve">
+    <value>Subidas en paralelo</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersHint" xml:space="preserve">
+    <value>Numero de archivos que se suben a la vez. Un valor mas alto puede acelerar las sincronizaciones con muchos archivos en S3/R2; valores muy altos pueden alcanzar los limites del proveedor y usar mas memoria. Los cambios se aplican al reiniciar Steam.</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersValue" xml:space="preserve">
+    <value>{0} trabajadores</value>
+  </data>
   <data name="Settings_SyncLuas" xml:space="preserve">
     <value>Sincronizar archivos lua</value>
   </data>

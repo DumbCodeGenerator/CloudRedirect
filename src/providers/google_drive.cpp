@@ -1125,7 +1125,10 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
     auto batchStart = std::chrono::steady_clock::now();
     uint64_t rlBefore = g_rateLimitHits.load(std::memory_order_relaxed);
 
-    static constexpr size_t kMaxParallel = 10;                 // native @nClientCloudMaxNumParallelUploads
+    // Runtime-configurable (config.json "upload_workers"); default 10 (native
+    // @nClientCloudMaxNumParallelUploads parity).
+    const size_t maxParallel =
+        g_uploadMaxParallel.load(std::memory_order_relaxed);
     // Lower than native's 64MB: Drive throttles per connection, so capping in-flight
     // bytes keeps each blob above the request receive timeout on a home uplink.
     // Runtime-configurable (config.json "upload_inflight_mb"); default 24 MB.
@@ -1175,11 +1178,11 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
         }
     };
 
-    // Worker count = min(kMaxParallel, items), capped further by avg size so total
+    // Worker count = min(maxParallel, items), capped further by avg size so total
     // bytes in flight stay roughly under kMaxBytesInFlight.
     uint64_t totalBytes = 0;
     for (const auto& it : items) totalBytes += it.data.size();
-    size_t byCount = (std::min)(kMaxParallel, items.size());
+    size_t byCount = (std::min)(maxParallel, items.size());
     size_t byBytes = byCount;
     if (totalBytes > kMaxBytesInFlight && items.size() > 1) {
         // Keep concurrent bytes roughly under the cap (avg item size based).

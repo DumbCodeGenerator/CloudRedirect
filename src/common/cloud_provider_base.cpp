@@ -20,6 +20,10 @@ std::atomic<uint64_t> g_rateLimitHits{0};
 // config.json "upload_inflight_mb" at DLL init.
 std::atomic<uint64_t> g_uploadInFlightCapBytes{24ull << 20};
 
+// Parallel upload worker count (see header). Default 10 (native parity);
+// overridden from config.json "upload_workers" at DLL init.
+std::atomic<size_t> g_uploadMaxParallel{10};
+
 // ── ParsePath ──────────────────────────────────────────────────────────────
 
 bool CloudProviderBase::ParsePath(const std::string& path,

@@ -7,6 +7,7 @@
 #include <utility>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 class S3Provider : public ICloudProvider {
 public:
@@ -17,6 +18,7 @@ public:
     bool IsAuthenticated() const override;
 
     bool Upload(const std::string& path, const uint8_t* data, size_t len) override;
+    bool UploadBatch(const std::vector<UploadItem>& items) override;
     bool Download(const std::string& path, std::vector<uint8_t>& outData) override;
     bool Remove(const std::string& path) override;
     ExistsStatus CheckExists(const std::string& path) override;
@@ -32,7 +34,10 @@ public:
     bool RemoveVersion(const std::string& path,
                        const std::string& versionId) override;
 
-    const std::string& LastUploadVersionId() const { return m_lastUploadVersionId; }
+    std::string LastUploadVersionId() const {
+        std::lock_guard<std::mutex> lk(m_lastUploadVersionIdMtx);
+        return m_lastUploadVersionId;
+    }
 
 protected:
     virtual bool ParseExtraCredentials(const std::string& /*json*/) { return true; }
@@ -53,6 +58,7 @@ protected:
     bool m_versioningEnabled = false;
     bool m_ready = false;
     std::string m_lastUploadVersionId;
+    mutable std::mutex m_lastUploadVersionIdMtx;
 
     size_t m_multipartThreshold = 64ull * 1024 * 1024;
     size_t m_partSize          = 16ull * 1024 * 1024;
@@ -95,4 +101,9 @@ private:
     bool MultipartComplete(const std::string& objectKey, const std::string& uploadId,
                            const std::vector<std::string>& etags);
     void MultipartAbort(const std::string& objectKey, const std::string& uploadId);
+
+    void SetLastVersionId(const std::string& v) {
+        std::lock_guard<std::mutex> lk(m_lastUploadVersionIdMtx);
+        m_lastUploadVersionId = v;
+    }
 };

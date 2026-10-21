@@ -755,6 +755,15 @@
   <data name="CloudProvider_UploadInFlightAggressive" xml:space="preserve">
     <value>激进 (64)</value>
   </data>
+  <data name="CloudProvider_UploadWorkers" xml:space="preserve">
+    <value>并行上传数</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersHint" xml:space="preserve">
+    <value>同时上传的文件数量。增大可加快 S3/R2 上多文件同步；过高可能触发提供商限流并占用更多内存。更改在重启 Steam 后生效。</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersValue" xml:space="preserve">
+    <value>{0} 个线程</value>
+  </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- AppsPage XAML                                                      -->

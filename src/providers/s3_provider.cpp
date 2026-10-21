@@ -8,7 +8,9 @@
 #include <ctime>
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <random>
 #include <thread>
 
@@ -262,11 +264,105 @@ bool S3Provider::Upload(const std::string& path, const uint8_t* data, size_t len
     HttpUtil::HttpResp r = SignedRequest("PUT", objectKey, "", body,
                                          ChecksumHeader(data, len));
     if (r.status != 200) {
-        m_lastUploadVersionId.clear();
+        SetLastVersionId({});
         return false;
     }
     auto it = r.headers.find("x-amz-version-id");
-    m_lastUploadVersionId = (it != r.headers.end()) ? it->second : std::string();
+    SetLastVersionId((it != r.headers.end()) ? it->second : std::string());
+    return true;
+}
+
+bool S3Provider::UploadBatch(const std::vector<UploadItem>& items) {
+    // S3 has no batch upload API; parallel workers mirror Drive/OneDrive logic.
+    // The base sequential impl issues HEAD+PUT per file one at a time, which made a
+    // 100-file batch take tens of seconds at ~2 round trips per file.
+    if (items.empty()) return true;
+
+    auto batchStart = std::chrono::steady_clock::now();
+    uint64_t rlBefore = g_rateLimitHits.load(std::memory_order_relaxed);
+
+    // Runtime-configurable (config.json "upload_workers"); default 10.
+    const size_t maxParallel =
+        g_uploadMaxParallel.load(std::memory_order_relaxed);
+    // Cap in-flight bytes so a large blob doesn't blow the request receive timeout.
+    // Runtime-configurable (config.json "upload_inflight_mb"); default 24 MB.
+    const uint64_t kMaxBytesInFlight =
+        g_uploadInFlightCapBytes.load(std::memory_order_relaxed);
+
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::atomic<size_t> dedupSkips{0};
+
+    auto worker = [&]() {
+        for (;;) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= items.size()) return;
+            const UploadItem& item = items[i];
+            // An exception escaping a std::thread entry calls std::terminate, so catch here.
+            bool ok = false;
+            try {
+                // CAS dedup: skip upload if the content-addressed blob already exists.
+                if (CheckExists(item.path) == ExistsStatus::Exists) {
+                    dedupSkips.fetch_add(1, std::memory_order_relaxed);
+                    ok = true;
+                } else {
+                    ok = Upload(item.path, item.data.data(), item.data.size());
+                }
+            } catch (const std::exception& e) {
+                LOG("[S3] UploadBatch: worker threw on '%s': %s",
+                    item.path.c_str(), e.what());
+            } catch (...) {
+                LOG("[S3] UploadBatch: worker threw (unknown) on '%s'", item.path.c_str());
+            }
+            if (!ok) {
+                failed.store(true, std::memory_order_relaxed);
+                LOG("[S3] UploadBatch: failed to upload '%s'", item.path.c_str());
+                return;
+            }
+        }
+    };
+
+    // Worker count = min(maxParallel, items), capped further by avg size so total
+    // bytes in flight stay roughly under kMaxBytesInFlight.
+    uint64_t totalBytes = 0;
+    for (const auto& it : items) totalBytes += it.data.size();
+    size_t byCount = (std::min)(maxParallel, items.size());
+    size_t byBytes = byCount;
+    if (totalBytes > kMaxBytesInFlight && items.size() > 1) {
+        uint64_t avg = totalBytes / items.size();
+        if (avg > 0) {
+            size_t cap = (size_t)(kMaxBytesInFlight / avg);
+            byBytes = (cap < 1) ? 1 : cap;
+        }
+    }
+    size_t workerCount = (std::min)(byCount, byBytes);
+    if (workerCount < 1) workerCount = 1;
+
+    std::vector<std::thread> pool;
+    pool.reserve(workerCount);
+    for (size_t t = 0; t < workerCount; ++t) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+
+    if (failed.load(std::memory_order_relaxed)) {
+        // No rollback: CAS blobs are content-addressed, so a re-upload after a
+        // failed batch is idempotent (HEAD dedup skips what already landed) and
+        // GC reclaims any orphan. Deleting here could race a concurrent reference.
+        LOG("[S3] UploadBatch: a parallel upload failed; leaving already-uploaded "
+            "CAS blobs in place (re-sync HEAD-dedups them)");
+        return false;
+    }
+
+    double elapsedSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - batchStart).count();
+    uint64_t rlHits = g_rateLimitHits.load(std::memory_order_relaxed) - rlBefore;
+    double filesPerSec = elapsedSec > 0 ? items.size() / elapsedSec : 0.0;
+    double mbPerSec = elapsedSec > 0 ? (totalBytes / (1024.0 * 1024.0)) / elapsedSec : 0.0;
+    LOG("[S3] UploadBatch: %zu file(s) (%zu uploaded, %zu CAS-skipped) "
+        "with %zu parallel worker(s) in %.1fs (%.2f files/s, %.2f MB/s, %llu rate-limit hits)",
+        items.size(), items.size() - dedupSkips.load(), dedupSkips.load(),
+        workerCount, elapsedSec, filesPerSec, mbPerSec,
+        (unsigned long long)rlHits);
     return true;
 }
 
@@ -527,13 +623,13 @@ bool S3Provider::MultipartComplete(const std::string& objectKey, const std::stri
 
     std::string query = "uploadId=" + HttpUtil::UrlEncode(uploadId, false);
     HttpUtil::HttpResp r = SignedRequest("POST", objectKey, query, body);
-    if (r.status != 200) { m_lastUploadVersionId.clear(); return false; }
+    if (r.status != 200) { SetLastVersionId({}); return false; }
     if (r.body.find("<Error>") != std::string::npos) {
-        m_lastUploadVersionId.clear();
+        SetLastVersionId({});
         return false;
     }
     auto it = r.headers.find("x-amz-version-id");
-    m_lastUploadVersionId = (it != r.headers.end()) ? it->second : std::string();
+    SetLastVersionId((it != r.headers.end()) ? it->second : std::string());
     return true;
 }
 
@@ -545,7 +641,7 @@ void S3Provider::MultipartAbort(const std::string& objectKey, const std::string&
 
 bool S3Provider::UploadMultipart(const std::string& objectKey, const uint8_t* data, size_t len) {
     std::string uploadId = MultipartCreate(objectKey);
-    if (uploadId.empty()) { m_lastUploadVersionId.clear(); return false; }
+    if (uploadId.empty()) { SetLastVersionId({}); return false; }
 
     std::vector<std::string> etags;
     etags.reserve(len / m_partSize + 1);
@@ -557,7 +653,7 @@ bool S3Provider::UploadMultipart(const std::string& objectKey, const uint8_t* da
                                                data + off, chunk);
         if (etag.empty()) {
             MultipartAbort(objectKey, uploadId);
-            m_lastUploadVersionId.clear();
+            SetLastVersionId({});
             return false;
         }
         etags.push_back(std::move(etag));

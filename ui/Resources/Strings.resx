@@ -1634,6 +1634,15 @@ Are you sure?</value>
   <data name="CloudProvider_UploadInFlightAggressive" xml:space="preserve">
     <value>Aggressive (64)</value>
   </data>
+  <data name="CloudProvider_UploadWorkers" xml:space="preserve">
+    <value>Parallel Uploads</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersHint" xml:space="preserve">
+    <value>Number of files uploaded at the same time. Higher values can speed up many-file syncs on S3/R2; very high values may hit provider rate limits and use more memory. Changes take effect after restarting Steam.</value>
+  </data>
+  <data name="CloudProvider_UploadWorkersValue" xml:space="preserve">
+    <value>{0} workers</value>
+  </data>
   <data name="Settings_SyncLuas" xml:space="preserve">
     <value>Sync Lua Files</value>
   </data>

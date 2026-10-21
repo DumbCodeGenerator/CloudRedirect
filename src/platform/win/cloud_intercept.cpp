@@ -4643,6 +4643,17 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                     std::memory_order_relaxed);
         }
 
+        // Parallel upload workers, clamped 1..16; absent/out-of-range keeps 10.
+        if (cfg["upload_workers"].type == Json::Type::Number) {
+            int n = static_cast<int>(cfg["upload_workers"].integer());
+            if (n >= 1 && n <= 16)
+                g_uploadMaxParallel.store((size_t)n, std::memory_order_relaxed);
+        }
+        LOG("[NS] Config: upload_workers=%zu, upload_inflight_mb=%llu",
+            g_uploadMaxParallel.load(std::memory_order_relaxed),
+            (unsigned long long)(g_uploadInFlightCapBytes.load(
+                std::memory_order_relaxed) >> 20));
+
         // Lua sync requires SteamTools.
         if (MetadataSync::steamToolsPresent.load(std::memory_order_relaxed)) {
             if (cfg["sync_luas"].type == Json::Type::Bool)

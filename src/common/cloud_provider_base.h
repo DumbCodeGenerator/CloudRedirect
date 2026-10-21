@@ -22,6 +22,10 @@ extern std::atomic<uint64_t> g_rateLimitHits;
 // 24 MB). Lower keeps each large blob above the request receive timeout.
 extern std::atomic<uint64_t> g_uploadInFlightCapBytes;
 
+// Max parallel uploads in UploadBatch (config.json "upload_workers", default
+// 10). Applies to Drive and S3/R2; the byte cap above still limits it further.
+extern std::atomic<size_t> g_uploadMaxParallel;
+
 struct TransportOptions {
     bool allowInsecureHttp = false;   // permit plaintext http:// (LAN MinIO/Garage)
     bool allowInsecureTls  = false;   // skip TLS cert verification (self-signed)

@@ -297,7 +297,7 @@
                          Aggressive right-anchored. -->
                     <StackPanel Grid.Column="0">
                         <Slider x:Name="UploadInFlightSlider"
-                                Minimum="24" Maximum="64"
+                                Minimum="24" Maximum="64" Value="24"
                                 TickFrequency="5" IsSnapToTickEnabled="True"
                                 TickPlacement="BottomRight"
                                 ValueChanged="UploadInFlightSlider_Changed" />
@@ -325,6 +325,40 @@
                     </StackPanel>
 
                     <TextBlock x:Name="UploadInFlightValue"
+                               Grid.Column="1"
+                               MinWidth="64"
+                               TextAlignment="Right"
+                               VerticalAlignment="Top"
+                               Margin="12,0,0,0"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                </Grid>
+            </StackPanel>
+
+            <StackPanel x:Name="UploadWorkersSection" Margin="0,0,0,24" Visibility="Collapsed">
+                <TextBlock Text="{res:Loc CloudProvider_UploadWorkers}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <TextBlock Text="{res:Loc CloudProvider_UploadWorkersHint}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,12" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <Slider x:Name="UploadWorkersSlider"
+                            Grid.Column="0"
+                            Minimum="1" Maximum="16" Value="10"
+                            TickFrequency="1" IsSnapToTickEnabled="True"
+                            TickPlacement="BottomRight"
+                            ValueChanged="UploadWorkersSlider_Changed" />
+
+                    <TextBlock x:Name="UploadWorkersValue"
                                Grid.Column="1"
                                MinWidth="64"
                                TextAlignment="Right"

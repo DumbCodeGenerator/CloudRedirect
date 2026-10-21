@@ -332,6 +332,16 @@ static void EnsureInitialized() {
                     g_uploadInFlightCapBytes.store((uint64_t)mb << 20,
                         std::memory_order_relaxed);
             }
+            // Parallel upload workers, clamped 1..16; absent keeps 10.
+            if (cfg["upload_workers"].type == Json::Type::Number) {
+                int n = static_cast<int>(cfg["upload_workers"].integer());
+                if (n >= 1 && n <= 16)
+                    g_uploadMaxParallel.store((size_t)n, std::memory_order_relaxed);
+            }
+            LOG("[NS] Config: upload_workers=%zu, upload_inflight_mb=%llu",
+                g_uploadMaxParallel.load(std::memory_order_relaxed),
+                (unsigned long long)(g_uploadInFlightCapBytes.load(
+                    std::memory_order_relaxed) >> 20));
             // Cache whether ANY stats feature is on -- hot path checks this.
             g_statsSyncEnabled.store(
                 MetadataSync::syncAchievements.load(std::memory_order_relaxed) ||

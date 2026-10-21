@@ -16,12 +16,17 @@ public partial class CloudProviderPage : Page
     private bool _loading;
     private readonly StringBuilder _logBuffer = new();
 
-    // Upload in-flight cap (MB). Only shown/saved for Google Drive.
+    // Upload in-flight cap (MB). Shown/saved for Google Drive and S3/R2.
     private const int InFlightDefaultMb = 24;
     private const int InFlightMinMb = 24;
     private const int InFlightMaxMb = 64;
-    // Suppresses the slider ValueChanged handler during programmatic load.
+    // Parallel upload workers. Shown/saved for Google Drive and S3/R2.
+    private const int WorkersDefault = 10;
+    private const int WorkersMin = 1;
+    private const int WorkersMax = 16;
+    // Suppresses the slider ValueChanged handlers during programmatic load.
     private bool _inFlightLoading;
+    private bool _workersLoading;
 
     public CloudProviderPage()
     {
@@ -45,7 +50,8 @@ public partial class CloudProviderPage : Page
         string DefaultLocalPath,
         string PathTextOverride,
         Services.TokenStatus? TokenStatus,
-        int UploadInFlightMb);
+        int UploadInFlightMb,
+        int UploadWorkers);
 
     // M14: Read config + token status off UI thread to avoid disk/DPAPI stall.
     private async Task LoadCurrentConfigAsync()
@@ -75,7 +81,8 @@ public partial class CloudProviderPage : Page
                 if (config?.TokenPath != null && config.Provider is not "r2" and not "s3")
                     tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
 
-                return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus, ReadUploadInFlightMb());
+                return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus,
+                    ReadUploadInFlightMb(), ReadUploadWorkers());
             });
 
             ApplyLoadedSnapshot(snapshot);
@@ -93,6 +100,7 @@ public partial class CloudProviderPage : Page
     private void ApplyLoadedSnapshot(LoadedConfigSnapshot snap)
     {
         ApplyUploadInFlight(snap.UploadInFlightMb);
+        ApplyUploadWorkers(snap.UploadWorkers);
 
         if (snap.Config == null)
         {
@@ -216,8 +224,11 @@ public partial class CloudProviderPage : Page
 
         // R2 uses static credentials (no OAuth sign-in flow).
         SignInButton.Visibility = needsOAuth ? Visibility.Visible : Visibility.Collapsed;
-        // Upload in-flight cap is a Google Drive-only throttle.
-        UploadInFlightSection.Visibility = tag == "gdrive" ? Visibility.Visible : Visibility.Collapsed;
+        // Parallel-upload tuning applies to Drive and S3/R2: the providers that
+        // run a client-side parallel UploadBatch.
+        bool supportsUploadTuning = tag is "gdrive" or "s3" or "r2";
+        UploadInFlightSection.Visibility = supportsUploadTuning ? Visibility.Visible : Visibility.Collapsed;
+        UploadWorkersSection.Visibility = supportsUploadTuning ? Visibility.Visible : Visibility.Collapsed;
         // R2 credential entry panel.
         R2CredentialsPanel.Visibility = isR2 ? Visibility.Visible : Visibility.Collapsed;
         // S3-compatible credential entry panel.
@@ -855,7 +866,8 @@ public partial class CloudProviderPage : Page
     private void UploadInFlightSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         UpdateUploadInFlightValueLabel();
-        if (_inFlightLoading) return;
+        // Skip saves during XAML init (Value coercion) and programmatic load.
+        if (!IsLoaded || _inFlightLoading) return;
         SaveUploadInFlight();
     }
 
@@ -872,6 +884,57 @@ public partial class CloudProviderPage : Page
         Services.ConfigHelper.SaveConfig(Services.SteamDetector.GetConfigFilePath(),
             new[] { "upload_inflight_mb" },
             writer => writer.WriteNumber("upload_inflight_mb", mb));
+    }
+
+    /// <summary>Reads upload_workers from config.json, clamped 1..16.
+    /// Absent/invalid -> the 10-worker default. Off the UI thread.</summary>
+    private static int ReadUploadWorkers()
+    {
+        try
+        {
+            var path = Services.SteamDetector.GetConfigFilePath();
+            if (!File.Exists(path)) return WorkersDefault;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.TryGetProperty("upload_workers", out var w) && w.TryGetInt32(out var n))
+                return Math.Clamp(n, WorkersMin, WorkersMax);
+        }
+        catch { }
+        return WorkersDefault;
+    }
+
+    private void ApplyUploadWorkers(int workers)
+    {
+        _workersLoading = true;
+        try
+        {
+            UploadWorkersSlider.Value = Math.Clamp(workers, WorkersMin, WorkersMax);
+            UpdateUploadWorkersValueLabel();
+        }
+        finally { _workersLoading = false; }
+    }
+
+    private void UploadWorkersSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateUploadWorkersValueLabel();
+        // Skip saves during XAML init (Value coercion) and programmatic load.
+        if (!IsLoaded || _workersLoading) return;
+        SaveUploadWorkers();
+    }
+
+    private void UpdateUploadWorkersValueLabel()
+    {
+        if (UploadWorkersValue != null)
+            UploadWorkersValue.Text = S.Format("CloudProvider_UploadWorkersValue", (int)UploadWorkersSlider.Value);
+    }
+
+    /// <summary>Persists upload_workers (clamped 1..16) into config.json.</summary>
+    private void SaveUploadWorkers()
+    {
+        int workers = Math.Clamp((int)Math.Round(UploadWorkersSlider.Value), WorkersMin, WorkersMax);
+        Services.ConfigHelper.SaveConfig(Services.SteamDetector.GetConfigFilePath(),
+            new[] { "upload_workers" },
+            writer => writer.WriteNumber("upload_workers", workers));
     }
 
     private void AppendLog(string message)
